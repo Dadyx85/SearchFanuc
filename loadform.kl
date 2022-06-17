@@ -1,0 +1,15 @@
+PROGRAM loadform
+VAR                                               
+status:INTEGER
+BEGIN
+KCL ('LOAD DICT setp setp',status)		
+KCL ('LOAD VARS setp',status)
+KCL ('LOAD DICT srch srch',status)		
+KCL ('LOAD VARS srch',status)
+KCL ('LOAD DICT diap diap',status)		
+KCL ('LOAD VARS diap',status)
+KCL ('LOAD DICT cnwm cnwm',status)		
+KCL ('LOAD VARS cnwm',status)
+KCL ('LOAD DICT elnf elnf',status)		
+KCL ('LOAD VARS elnf',status)
+END loadform

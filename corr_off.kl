@@ -1,0 +1,61 @@
+PROGRAM corr_off
+%COMMENT='Off correction'
+%NOLOCKGROUP
+%NOPAUSE=ERROR+COMMAND+TPENABLE
+%NOABORT=ERROR+COMMAND+TPENABLE
+VAR
+status:INTEGER
+old_base: POSITION
+real_v:REAL
+str_v:STRING[1]
+n,nn,time_int,start_base_num FROM search:INTEGER
+log_enb FROM search:BOOLEAN
+time_str:STRING[30]
+log_str FROM search:ARRAY[9] OF STRING[40]
+CONST
+ER_WARN = 0 -- warning constant for use in POST_ERR
+SUCCESS = 0 -- success constant
+--------------------------------------------------------------------
+--check status
+ROUTINE chk_stat (rec_stat: INTEGER)
+BEGIN
+IF (rec_stat <> SUCCESS) THEN -- if rec_stat is not SUCCESS then post the error
+POST_ERR (rec_stat,'', 0, ER_WARN) -- Post the error to the system.
+ENDIF
+END chk_stat
+--------------------------------------------------------------------
+--write messages
+ROUTINE message(mes:STRING)
+CONST
+	cc_home = 137
+	cc_clear_win = 128
+BEGIN
+	WRITE TPERROR (CHR(cc_home) + CHR(cc_clear_win),mes)
+END message
+---------------------------------------------------------------------
+--write log
+ROUTINE write_log(log:STRING) FROM search
+--------------------------------------------------------------------
+--check_parameters
+ROUTINE check_param FROM search 
+-------------------------------------------------------------------- 
+--main program
+BEGIN
+
+check_param
+
+$UTOOL=$MNUTOOL[1,$MNUTOOLNUM[1]]
+$UFRAME=$MNUFRAME[1,$MNUFRAMENUM[1]]
+
+old_base=GET_POS_REG(start_base_num,status)
+chk_stat(status)
+$MNUFRAME[1,$MNUFRAMENUM[1]]=old_base
+
+message('Correction off.')
+IF log_enb THEN
+write_log('Correction off.')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+
+END corr_off

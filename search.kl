@@ -1,0 +1,616 @@
+PROGRAM search
+%COMMENT='Search process'
+%NOLOCKGROUP
+%NOPAUSE=ERROR+COMMAND+TPENABLE
+%NOABORT=ERROR+COMMAND+TPENABLE
+%INCLUDE setp
+%INCLUDE srch
+%INCLUDE elnf
+%INCLUDE cnwm
+%INCLUDE diap
+%INCLUDE klevkmsk
+VAR
+condition_num,contact_di,contact_do,error_do,vel_search,vel_back,range,dist,start_base_num,delay_time,relay_time IN CMOS:INTEGER
+log_enb IN CMOS:BOOLEAN
+correction:FILE
+strt_pos,tool,base:XYZWPR
+offset:VECTOR
+srch_pos:XYZWPR
+ref_pos:XYZWPR
+temp:STRING[5]
+corr_name:STRING[40]
+calibrate,srch_ok,skip,out_of,pp:BOOLEAN
+temp_name:STRING[20]
+tmp_pos_strt,mess_pos:XYZWPR
+old_vel,real_v:REAL
+str_v:STRING[5]
+teach_touch:STRING[15]
+old_ovrd,int_v,entry,status:INTEGER
+log_str IN DRAM: ARRAY[9] OF STRING[40]
+n,nn,time_int:INTEGER
+time_str:STRING[30]
+CONST
+ER_WARN = 0 -- warning constant for use in POST_ERR
+SUCCESS = 0 -- success constant
+--------------------------------------------------------------------
+--check status
+ROUTINE chk_stat (rec_stat: INTEGER)
+BEGIN
+IF (rec_stat <> SUCCESS) THEN -- if rec_stat is not SUCCESS then post the error
+POST_ERR (rec_stat,'', 0, ER_WARN) -- Post the error to the system.
+ENDIF
+END chk_stat
+--------------------------------------------------------------------
+--write messages
+ROUTINE message0(mes:STRING)
+CONST
+	cc_home = 137
+	cc_clear_win = 128
+BEGIN
+	WRITE TPERROR (CHR(cc_home) + CHR(cc_clear_win),mes)
+END message0
+--------------------------------------------------------------------
+--write messages
+ROUTINE message1(mes0:STRING;cor_n:STRING;mes1:STRING)
+CONST
+	cc_home = 137
+	cc_clear_win = 128
+BEGIN
+	WRITE TPERROR (CHR(cc_home) + CHR(cc_clear_win),mes0,cor_n,mes1)
+END message1
+--------------------------------------------------------------------
+--write messages
+ROUTINE message2(mes0:STRING;cor_n:STRING;mes1:STRING;offs:STRING;mes2:STRING)
+CONST
+	cc_home = 137
+	cc_clear_win = 128
+BEGIN
+	WRITE TPERROR (CHR(cc_home) + CHR(cc_clear_win),mes0,cor_n,mes1,offs,mes2)
+END message2
+---------------------------------------------------------------------
+--write log
+ROUTINE write_log(log:STRING)
+
+BEGIN
+
+GET_TIME(time_int) -- Get the system time
+CNV_TIME_STR(time_int, time_str)
+time_str=SUB_STR(time_str,10,6)
+
+IF UNINIT(nn)=TRUE THEN
+nn=1
+ENDIF	
+
+log_str[nn]=log+time_str
+
+WRITE(CHR(137)+CHR(128))
+	
+IF nn<9 THEN	
+FOR n=nn DOWNTO 1 DO
+WRITE(log_str[n],CR)
+ENDFOR
+ELSE
+
+FOR n=9 DOWNTO 1 DO
+WRITE (log_str[n],CR)
+ENDFOR
+
+FOR n=1 TO nn-1 DO
+log_str[n]=log_str[n+1]	
+ENDFOR
+
+ENDIF
+
+nn=nn+1
+
+IF nn>=9 THEN
+nn=9	
+ENDIF
+
+END write_log
+-------------------------------------------------------------------- 
+--split file
+ROUTINE split(data:STRING)
+VAR
+i,ii,indx:INTEGER
+x_str,y_str,z_str:STRING[12]
+cur_char:STRING[1]
+temp_str:STRING[100]
+chng:BOOLEAN
+dt:ARRAY[11] OF STRING[12]
+BEGIN
+	
+indx=0
+i=0	
+ii=1
+
+FOR ii=1 TO 11 DO
+chng=FALSE
+temp_str=''
+dt[ii]=''
+i=indx+1
+REPEAT
+cur_char=SUB_STR(data,i,1)
+IF cur_char<>',' THEN	
+	IF NOT chng THEN				
+		dt[ii]=dt[ii]+cur_char		
+	ELSE		
+		temp_str=temp_str+cur_char		
+	ENDIF		
+ELSE	
+	chng=TRUE	
+	indx=i	
+ENDIF
+i=i+1
+UNTIL cur_char=',' 
+ENDFOR
+
+CNV_STR_REAL(dt[1], srch_pos.x)
+CNV_STR_REAL(dt[2], srch_pos.y)
+CNV_STR_REAL(dt[3], srch_pos.z)
+CNV_STR_REAL(dt[4], ref_pos.x)
+CNV_STR_REAL(dt[5], ref_pos.y)
+CNV_STR_REAL(dt[6], ref_pos.z)
+CNV_STR_REAL(dt[7], offset.x)
+CNV_STR_REAL(dt[8], offset.y)
+CNV_STR_REAL(dt[9], offset.z)
+
+IF dt[10]=' TRUE' THEN
+calibrate=TRUE
+ENDIF
+IF dt[10]=' FALSE' THEN
+calibrate=FALSE
+ENDIF	
+IF dt[11]=' TRUE' THEN
+srch_ok=TRUE
+ENDIF
+IF dt[11]=' FALSE' THEN
+srch_ok=FALSE
+ENDIF
+
+END split
+---------------------------------------------------------------------
+--round real var
+ROUTINE okrugl1(rl:REAL):STRING
+VAR
+dataokr:REAL
+dataint:INTEGER
+offsetstr:STRING[9]
+BEGIN
+dataint=ROUND(rl*1000)
+dataokr=dataint/1000
+CNV_REAL_STR(dataokr, 7, 2, offsetstr)
+RETURN (offsetstr)
+END okrugl1
+-------------------------------------------------------------------- 
+--Read, write correction file
+ROUTINE corr_file_rw(rw:BOOLEAN;errr:BOOLEAN)
+VAR 
+corr_path:STRING[50]
+data_str:STRING[100]
+srch_posx,srch_posy,srch_posz,ref_posx,ref_posy,ref_posz,offsetx,offsety,offsetz:STRING[9]
+i:INTEGER
+BEGIN
+	
+corr_path='fr:\correction\'+corr_name+'.dt'
+
+IF rw=FALSE THEN
+CLR_IO_STAT(correction)
+OPEN FILE correction ('RW',corr_path)
+status = IO_STATUS(correction)
+IF status<>0 THEN
+WRITE TPERROR('Could not open correction file!', status, CR)
+ABORT
+ENDIF
+
+srch_posx=okrugl1(srch_pos.x)
+srch_posy=okrugl1(srch_pos.y)
+srch_posz=okrugl1(srch_pos.z)
+ref_posx=okrugl1(ref_pos.x)
+ref_posy=okrugl1(ref_pos.y)
+ref_posz=okrugl1(ref_pos.z)
+offsetx=okrugl1(offset.x)
+offsety=okrugl1(offset.y)
+offsetz=okrugl1(offset.z)
+
+IF errr=TRUE THEN
+srch_ok=FALSE
+ENDIF
+
+IF status=0 THEN
+WRITE correction (srch_posx,',',srch_posy,',',srch_posz,',',ref_posx,',',ref_posy,',',ref_posz,',',offsetx,',',offsety,',',offsetz,',',calibrate,',',srch_ok,',',CR)
+CLOSE FILE correction
+ENDIF
+ENDIF
+
+IF rw=TRUE THEN
+CLR_IO_STAT(correction)
+OPEN FILE correction ('RO',corr_path)
+status = IO_STATUS(correction)
+IF status<>0 THEN
+message1('Correction ',corr_name,' not teached!')
+IF log_enb THEN
+write_log('Correction '+corr_name+' not teached!')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+ABORT
+ENDIF
+IF status=0 THEN
+READ correction(data_str,CR)     
+CLOSE FILE correction
+IF UNINIT(data_str) THEN
+message1('Correction ',corr_name,' is empty!')
+IF log_enb THEN
+write_log('Correction '+corr_name+' is empty!')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+ABORT	
+ENDIF	
+split(data_str)
+ENDIF
+ENDIF
+
+END corr_file_rw
+-------------------------------------------------------------------- 
+--move
+ROUTINE movel(posit:XYZWPR;srch:BOOLEAN)
+VAR
+srch_dir,src_dist:VECTOR
+tmp_pos_srch:XYZWPR
+len_vec,cos_a,cos_b,cos_c:REAL
+BEGIN	
+	
+old_vel=$SPEED	
+	
+$MOTYPE=LINEAR
+$TERMTYPE=FINE
+
+IF srch=TRUE THEN
+$SPEED=vel_search
+ENDIF
+
+IF srch=FALSE THEN
+$SPEED=vel_back
+ENDIF
+
+IF srch=FALSE THEN
+tmp_pos_strt=posit
+DELAY relay_time
+MOVE TO posit
+ENDIF
+
+IF srch=TRUE THEN
+tmp_pos_srch=posit	
+srch_dir.x=tmp_pos_srch.x-tmp_pos_strt.x
+srch_dir.y=tmp_pos_srch.y-tmp_pos_strt.y
+srch_dir.z=tmp_pos_srch.z-tmp_pos_strt.z
+len_vec=SQRT(srch_dir.x*srch_dir.x+srch_dir.y*srch_dir.y+srch_dir.z*srch_dir.z)
+cos_a=srch_dir.x/len_vec
+cos_b=srch_dir.y/len_vec
+cos_c=srch_dir.z/len_vec
+src_dist.x=dist*cos_a
+src_dist.y=dist*cos_b
+src_dist.z=dist*cos_c
+MOVE RELATIVE src_dist		
+ENDIF
+
+END movel
+---------------------------------------------------------------------
+--offset string
+ROUTINE okrugl(xoffs:REAL;yoffs:REAL;zoffs:REAL):STRING
+VAR
+dataokr,offset_real:REAL
+dataint:INTEGER
+offsetstr:STRING[7]
+BEGIN
+offset_real=SQRT(xoffs*xoffs+yoffs*yoffs+zoffs*zoffs)	
+dataint=ROUND(offset_real*100)
+dataokr=dataint/100
+CNV_REAL_STR(dataokr, 4, 1, offsetstr)
+IF (ABS(xoffs)>ABS(yoffs)) AND (ABS(xoffs)>ABS(zoffs)) THEN
+IF xoffs<0 THEN
+offsetstr = SUB_STR(offsetstr,2,STR_LEN(offsetstr))	
+offsetstr	=' -'+offsetstr
+ENDIF
+ENDIF
+IF (ABS(yoffs)>ABS(xoffs)) AND (ABS(yoffs)>ABS(zoffs)) THEN
+IF yoffs<0 THEN
+offsetstr = SUB_STR(offsetstr,2,STR_LEN(offsetstr))	
+offsetstr	=' -'+offsetstr	
+ENDIF
+ENDIF
+IF (ABS(zoffs)>ABS(xoffs)) AND (ABS(zoffs)>ABS(yoffs)) THEN
+IF zoffs<0 THEN
+offsetstr = SUB_STR(offsetstr,2,STR_LEN(offsetstr))	
+offsetstr	=' -'+offsetstr
+ENDIF
+ENDIF
+
+RETURN (offsetstr)
+END okrugl
+--------------------------------------------------------------------
+--offset calculation
+ROUTINE calc_offset
+VAR
+offset_real:REAL
+offset_str:STRING[7]
+BEGIN
+
+offset.x=ref_pos.x-mess_pos.x
+offset.y=ref_pos.y-mess_pos.y
+offset.z=ref_pos.z-mess_pos.z
+
+offset_real=SQRT(offset.x*offset.x+offset.y*offset.y+offset.z*offset.z)
+
+IF (-offset_real<=-range) AND (offset_real>=range) THEN
+out_of=TRUE	
+ENDIF	
+
+offset_str=okrugl(offset.x,offset.y,offset.z)
+message2('Correction ',corr_name,' =',offset_str,'mm.')
+IF log_enb THEN
+write_log('Correction '+corr_name+' ='+offset_str+'mm.')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+
+corr_file_rw(FALSE,FALSE)
+
+END calc_offset
+------------------------------------------------------------------- 
+--get master position
+ROUTINE master_posit
+
+BEGIN
+	
+IF calibrate=FALSE THEN
+mess_pos=CURPOS(0,0)
+srch_ok=TRUE
+calc_offset
+ENDIF	
+		
+IF calibrate=TRUE THEN
+ref_pos=CURPOS(0,0)
+srch_ok=TRUE
+calibrate=FALSE
+corr_file_rw(FALSE,FALSE)
+message1('Correction ',corr_name,' calibrated.')
+IF log_enb THEN
+write_log('Correction '+corr_name+' calibrated.')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+
+ENDIF
+
+movel(strt_pos,FALSE)
+
+END master_posit
+--------------------------------------------------------------------
+--search condition
+ROUTINE search_cond
+
+BEGIN
+
+srch_ok=FALSE	
+DOUT[contact_do]=ON	
+PURGE CONDITION [condition_num]
+			
+CONDITION[condition_num]:		
+WHEN DIN[contact_di]+ DO
+
+CANCEL
+master_posit
+DOUT[contact_do]=OFF	
+
+DISABLE CONDITION[condition_num]
+ENDCONDITION
+
+ENABLE CONDITION[condition_num]				
+	
+END search_cond
+-------------------------------------------------------------------- 
+--teach
+ROUTINE teach(err:BOOLEAN;dict_name:STRING;ele_number:INTEGER)
+VAR
+value_array:ARRAY[1] OF STRING[12]
+inact_array:ARRAY[1] OF BOOLEAN
+change_array:ARRAY[1] OF BOOLEAN
+term_char:INTEGER
+BEGIN
+
+FORCE_LINK(TP_PANEL,'CONFIG=single')
+FORCE_SPMENU(TP_PANEL, SPI_TPUSER2, 1)
+
+DISCTRL_FORM(dict_name,ele_number,value_array,inact_array,change_array,kc_func_key,1,term_char,status)
+chk_stat(status)
+
+IF term_char = 133 THEN
+skip=FALSE
+ENDIF	
+
+IF (term_char = 141) AND (err=FALSE) THEN
+srch_pos=CURPOS(0,0)
+ENDIF	
+
+IF (term_char = 134) AND (err=TRUE) THEN	
+skip=TRUE
+ENDIF
+
+FORCE_LINK(TP_PANEL,'CONFIG=double')
+FORCE_SPMENU(TP_PANEL, SPI_TPTCH, 1)
+
+END teach
+-------------------------------------------------------------------- 
+--setup
+ROUTINE setup
+VAR
+value_array:ARRAY[12] OF STRING[20]
+inact_array:ARRAY[1] OF BOOLEAN
+change_array:ARRAY[1] OF BOOLEAN
+term_char:INTEGER
+BEGIN
+
+value_array [1] = 'condition_num'
+value_array [2] = 'contact_di'
+value_array [3] = 'contact_do'
+value_array [4] = 'error_do'
+value_array [5] = 'vel_search'
+value_array [6] = 'vel_back'
+value_array [7] = 'range'
+value_array [8] = 'dist'
+value_array [9] = 'start_base_num'
+value_array [10] = 'delay_time'
+value_array [11] = 'relay_time'
+value_array [12] = 'log_enb'
+
+FORCE_LINK(TP_PANEL,'CONFIG=single')
+FORCE_SPMENU(TP_PANEL, SPI_TPUSER2, 1)
+
+DISCTRL_FORM('setp',setp,value_array,inact_array,change_array,kc_func_key,1,term_char,status)
+chk_stat(status)
+
+FORCE_LINK(TP_PANEL,'CONFIG=double')
+FORCE_SPMENU(TP_PANEL, SPI_TPTCH, 1)
+
+END setup
+-------------------------------------------------------------------- 
+--check_parameters
+ROUTINE check_param
+BEGIN
+IF UNINIT(condition_num) OR UNINIT(contact_di) OR UNINIT(contact_do) OR UNINIT(error_do) OR UNINIT(vel_search) OR UNINIT(vel_back) OR UNINIT(range) OR UNINIT(dist) OR UNINIT(start_base_num) OR UNINIT(delay_time) OR UNINIT(relay_time) OR UNINIT(log_enb) THEN
+setup
+ENDIF
+IF UNINIT(condition_num) OR UNINIT(contact_di) OR UNINIT(contact_do) OR UNINIT(error_do) OR UNINIT(vel_search) OR UNINIT(vel_back) OR UNINIT(range) OR UNINIT(dist) OR UNINIT(start_base_num) OR UNINIT(delay_time) OR UNINIT(relay_time) OR UNINIT(log_enb) THEN
+message0('Set parameters!')
+write_log('Set parameters!')
+ABORT
+ENDIF
+END check_param
+-------------------------------------------------------------------- 
+--main program
+BEGIN	
+
+check_param
+
+$ARG_STRING[1].$TITLE = 'Search setup'
+$ARG_STRING[1].$ITEM1 = 'Teach true'
+$ARG_STRING[1].$ITEM2 = 'Teach false'
+
+old_ovrd = $MCR.$GENOVERRIDE
+$MCR.$GENOVERRIDE = 100
+
+DELAY delay_time
+
+pp=FALSE
+WAIT FOR pp=FALSE
+	
+KCL ('MKDIR fr:\correction',status)		
+	
+$UTOOL=$MNUTOOL[1,$MNUTOOLNUM[1]]
+$UFRAME=$MNUFRAME[1,$MNUFRAMENUM[1]]
+
+strt_pos=CURPOS(0,0)
+offset.x=0
+offset.y=0
+offset.z=0
+skip=FALSE
+out_of=FALSE
+
+GET_TPE_PRM(1,1,int_v,real_v,teach_touch, status)
+chk_stat(status)
+GET_TPE_PRM(2,1,int_v,real_v,corr_name, status)
+chk_stat(status)
+
+IF teach_touch='Teach true'THEN
+ref_pos.x=0
+ref_pos.y=0
+ref_pos.z=0	
+srch_ok=FALSE
+calibrate=TRUE
+teach(FALSE,'srch',srch)
+IF (strt_pos.x=srch_pos.x) AND  (strt_pos.y=srch_pos.y) AND (strt_pos.z=srch_pos.z) AND (strt_pos.w=srch_pos.w) AND (strt_pos.p=srch_pos.p) AND (strt_pos.r=srch_pos.r) THEN
+message0('Start and search pos. are equal!')
+IF log_enb THEN
+write_log('Start and search pos. are equal!')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+ELSE	
+corr_file_rw(FALSE,FALSE)
+message1('Correction ',corr_name,' teached.')
+IF log_enb THEN
+write_log('Correction '+corr_name+' teached.')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+ENDIF
+STOP
+GOTO e	
+ENDIF
+
+r::
+IF  DIN[contact_di]=OFF THEN
+IF teach_touch='Teach false' THEN
+corr_file_rw(TRUE,FALSE)
+movel(strt_pos,FALSE)
+search_cond
+movel(srch_pos,TRUE)
+ENDIF
+
+IF ( teach_touch='Teach false') AND(srch_ok=TRUE)  AND (calibrate=FALSE) AND (out_of=TRUE) THEN
+message1('Correction ',corr_name,' - out of range!')
+IF log_enb THEN
+write_log('Corr. '+corr_name+' - out of range!')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF	
+PULSE DOUT[error_do] FOR 500
+teach(TRUE,'diap',diap)	
+ENDIF	
+
+IF ( teach_touch='Teach false') AND (srch_ok=FALSE) AND (calibrate=FALSE) AND (out_of=FALSE) THEN
+movel(strt_pos,FALSE)
+srch_ok=FALSE
+message1('Correction ',corr_name,' - part not found!')
+IF log_enb THEN
+write_log('Corr. '+corr_name+' - part not found!')
+ELSE
+WRITE(CHR(137)+CHR(128))
+ENDIF
+PULSE DOUT[error_do] FOR 500	
+teach(TRUE,'elnf',elnf)	
+IF skip=TRUE THEN	
+corr_file_rw(TRUE,TRUE)		
+corr_file_rw(FALSE,TRUE)	
+GOTO e	
+ENDIF
+IF skip=FALSE THEN
+GOTO r		
+ENDIF
+ENDIF
+ELSE	
+srch_ok=FALSE
+message1('Correction ',corr_name,' - metall contact!')
+IF log_enb THEN
+write_log('Corr. '+corr_name+' - metall contact!')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+PULSE DOUT[error_do] FOR 500
+teach(TRUE,'cnwm',cnwm)
+corr_file_rw(TRUE,TRUE)	
+corr_file_rw(FALSE,TRUE)
+ENDIF
+
+e::
+
+IF teach_touch='Teach true'THEN
+PAUSE	
+ENDIF
+
+$MCR.$GENOVERRIDE = old_ovrd
+
+END search

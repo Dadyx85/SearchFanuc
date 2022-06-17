@@ -1,0 +1,214 @@
+PROGRAM corr_on
+%COMMENT='Set correction'
+%NOLOCKGROUP
+%NOPAUSE=ERROR+COMMAND+TPENABLE
+%NOABORT=ERROR+COMMAND+TPENABLE
+VAR
+correction:FILE
+int_v,bn,status:INTEGER
+check_base,old_base: XYZWPR
+temp_base,new_base:POSITION
+n,nn,time_int,start_base_num FROM search:INTEGER
+log_enb FROM search:BOOLEAN
+time_str:STRING[30]
+conf:CONFIG
+real_v:REAL
+str_v:STRING[1]
+base_name:STRING[2]
+offset:VECTOR
+corr_name:STRING[20]
+srch_ok:BOOLEAN
+log_str FROM search:ARRAY[9] OF STRING[40]
+CONST
+ER_WARN = 0 -- warning constant for use in POST_ERR
+SUCCESS = 0 -- success constant
+--------------------------------------------------------------------
+--check status
+ROUTINE chk_stat (rec_stat: INTEGER)
+BEGIN
+IF (rec_stat <> SUCCESS) THEN -- if rec_stat is not SUCCESS then post the error
+POST_ERR (rec_stat,'', 0, ER_WARN) -- Post the error to the system.
+ENDIF
+END chk_stat
+--------------------------------------------------------------------
+--write messages
+ROUTINE message0(mes:STRING)
+CONST
+	cc_home = 137
+	cc_clear_win = 128
+BEGIN
+	WRITE TPERROR (CHR(cc_home) + CHR(cc_clear_win),mes)
+END message0
+--------------------------------------------------------------------
+--write messages
+ROUTINE message1(mes0:STRING;cor_n:STRING;mes1:STRING)
+CONST
+	cc_home = 137
+	cc_clear_win = 128
+BEGIN
+	WRITE TPERROR (CHR(cc_home) + CHR(cc_clear_win),mes0,cor_n,mes1)
+END message1
+---------------------------------------------------------------------
+--write log
+ROUTINE write_log(log:STRING) FROM search
+-------------------------------------------------------------------- 
+--split file
+ROUTINE split(data:STRING)
+VAR
+i,ii,indx:INTEGER
+x_str,y_str,z_str:STRING[12]
+cur_char:STRING[1]
+temp_str:STRING[100]
+chng:BOOLEAN
+dt:ARRAY[11] OF STRING[12]
+BEGIN
+	
+indx=0	
+ii=1
+
+FOR ii=1 TO 11 DO
+chng=FALSE
+temp_str=''
+dt[ii]=''
+i=indx+1
+REPEAT
+cur_char=SUB_STR(data,i,1)
+IF cur_char<>',' THEN	
+	IF NOT chng THEN				
+		dt[ii]=dt[ii]+cur_char		
+	ELSE		
+		temp_str=temp_str+cur_char		
+	ENDIF		
+ELSE	
+	chng=TRUE	
+	indx=i	
+ENDIF
+i=i+1
+UNTIL cur_char=',' 
+ENDFOR
+
+CNV_STR_REAL(dt[7], offset.x)
+CNV_STR_REAL(dt[8], offset.y)
+CNV_STR_REAL(dt[9], offset.z)
+
+IF dt[11]=' TRUE' THEN 	
+srch_ok=TRUE	
+ENDIF
+IF dt[11]=' FALSE' THEN 	
+srch_ok=FALSE	
+ENDIF
+
+END split
+-------------------------------------------------------------------- 
+--Read, write correction file
+ROUTINE corr_file_r
+VAR 
+corr_path:STRING[50]
+data_str:STRING[100]
+BEGIN
+	
+corr_path='fr:\correction\'+corr_name+'.dt'
+
+CLR_IO_STAT(correction)
+OPEN FILE correction ('RO',corr_path)
+status = IO_STATUS(correction)
+IF status<>0 THEN
+message1('Correction ',corr_name,' not exist!!!')
+IF log_enb THEN
+write_log('Correction '+corr_name+' not exist!!!')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+ABORT
+ENDIF
+IF status=0 THEN
+READ correction(data_str,CR)     
+CLOSE FILE correction
+IF UNINIT(data_str) THEN
+message1('Correction ',corr_name,' is empty!')
+IF log_enb THEN
+write_log('Correction '+corr_name+' is empty!')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+ABORT	
+ENDIF
+split(data_str)
+ENDIF
+
+END corr_file_r
+--------------------------------------------------------------------
+--set correction
+ROUTINE set_correction(num:INTEGER)
+BEGIN
+
+GET_TPE_PRM(num,3,int_v,real_v,corr_name, status)
+	
+IF status=0 THEN
+corr_file_r	
+temp_base=$MNUFRAME[1,$MNUFRAMENUM[1]]
+new_base=POS(temp_base.location.x - offset.x,temp_base.location.y - offset.y,temp_base.location.z - offset.z,old_base.w,old_base.p,old_base.r,temp_base.config_data)
+$MNUFRAME[1,$MNUFRAMENUM[1]]=new_base
+ENDIF
+
+IF (NOT UNINIT(corr_name)) AND (corr_name<>'') THEN
+IF srch_ok=TRUE THEN	
+message1('Correction ',corr_name, ' applied.')
+IF log_enb THEN
+write_log('Correction '+corr_name+' applied.')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+ENDIF
+IF srch_ok=FALSE THEN	
+message1('Search ',corr_name, ' was skipped.')
+IF log_enb THEN
+write_log('Search '+corr_name+' was skipped.')
+ELSE
+WRITE(CHR(137)+CHR(128))	
+ENDIF
+ENDIF
+ENDIF
+
+END set_correction
+--------------------------------------------------------------------
+--check_parameters
+ROUTINE check_param FROM search
+-------------------------------------------------------------------- 
+--main program
+BEGIN
+
+check_param
+
+$UTOOL=$MNUTOOL[1,$MNUTOOLNUM[1]]
+$UFRAME=$MNUFRAME[1,$MNUFRAMENUM[1]]
+
+offset.x=0
+offset.y=0
+offset.z=0
+	
+srch_ok=FALSE
+
+check_base=GET_POS_REG(start_base_num-1+$MNUFRAMENUM[1],status)
+chk_stat(status)
+
+old_base=$MNUFRAME[1,$MNUFRAMENUM[1]]
+
+IF UNINIT(check_base) THEN
+SET_POS_REG(start_base_num-1+$MNUFRAMENUM[1],old_base,status)
+chk_stat(status)
+
+bn=$MNUFRAMENUM[1]
+CNV_INT_STR(bn, 1, 0, base_name)
+
+SET_PREG_CMT(start_base_num-1+$MNUFRAMENUM[1],'Original base'+base_name,status)
+chk_stat(status)
+ENDIF
+
+IF (NOT UNINIT(check_base)) THEN
+set_correction(1)
+set_correction(2)
+set_correction(3)
+ENDIF
+
+END corr_on
